@@ -140,6 +140,10 @@ async def start_sse_server(args):
     print(f"DB Port: {os.getenv('DB_PORT')}")
     print(f"DB User: {os.getenv('DB_USER')}")
     print(f"DB Database: {os.getenv('DB_DATABASE')}")
+    print(f"DB Mysql Host: {os.getenv('DB_MYSQL_HOST')}")
+    print(f"DB Mysql Port: {os.getenv('DB_MYSQL_PORT')}")
+    print(f"DB Mysql User: {os.getenv('DB_MYSQL_USER')}")
+    print(f"DB Mysql Database: {os.getenv('DB_MYSQL_DATABASE')}")
     print(f"Force Refresh Metadata: {os.getenv('FORCE_REFRESH_METADATA', 'false')}")
     print("------------------------------")
     base_url = f"http://{args.host}:{args.port}"

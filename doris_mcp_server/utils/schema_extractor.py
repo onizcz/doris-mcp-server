@@ -27,6 +27,7 @@ MULTI_DATABASE_NAMES=os.getenv("MULTI_DATABASE_NAMES","")
 
 # Import local modules
 from doris_mcp_server.utils.db import execute_query_df, execute_query
+from doris_mcp_server.utils.dbMysql import execute_query_df_mysql, execute_query_mysql
 
 class MetadataExtractor:
     """Apache Doris Metadata Extractor"""
@@ -137,18 +138,22 @@ class MetadataExtractor:
             FROM 
                 information_schema.schemata 
             WHERE 
-                SCHEMA_NAME NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+                SCHEMA_NAME IN ('topwalk_dw', 'announce', 'asset-center', 'emergency', 'situation', 'vulnerability', 'base')
             ORDER BY 
                 SCHEMA_NAME
             """
             
             result = execute_query(query)
-            
-            if not result:
-                databases = []
-            else:
+            databases = []
+            if result:
                 databases = [db["SCHEMA_NAME"] for db in result]
                 logger.info(f"Retrieved database list: {databases}")
+
+            result2 = execute_query_mysql(query)
+            if result2:
+                databases2 = ["mysql_catalog_bigdata." + db["SCHEMA_NAME"] for db in result2]
+                databases.extend(databases2)
+                logger.info(f"Retrieved mysql database list: {databases}")
             
             # Update cache
             self.metadata_cache[cache_key] = databases
@@ -205,7 +210,7 @@ class MetadataExtractor:
                 logger.warning(f"Current database {self.db_name} is in the excluded list, metadata retrieval might not work properly")
             return [self.db_name] if self.db_name else []
     
-    def get_database_tables(self, db_name: Optional[str] = None) -> List[str]:
+    def get_database_tables(self, db_name: Optional[str] = None) -> List[Dict[str, str]]:
         """
         Get a list of all tables in the database
         
@@ -228,32 +233,55 @@ class MetadataExtractor:
             # Use information_schema.tables table to get table list
             query = f"""
             SELECT 
-                TABLE_NAME 
+                TABLE_NAME,TABLE_COMMENT  
             FROM 
                 information_schema.tables 
             WHERE 
                 TABLE_SCHEMA = '{db_name}' 
                 AND TABLE_TYPE = 'BASE TABLE'
             """
-            
-            result = execute_query(query, db_name)
-            logger.info(f"{db_name}.information_schema.tables query result: {result}")
-            
-            if not result:
-                tables = []
+
+
+            if "mysql_catalog_bigdata." in db_name:
+                db_name2 = db_name.removeprefix("mysql_catalog_bigdata.")
+                query2 = f"""
+                SELECT
+                    TABLE_NAME,TABLE_COMMENT 
+                FROM
+                    information_schema.tables
+                WHERE
+                    TABLE_SCHEMA = '{db_name2}'
+                    AND TABLE_TYPE = 'BASE TABLE'
+                """
+                result = execute_query_mysql(query2, db_name2)
             else:
-                tables = [table['TABLE_NAME'] for table in result]
-                logger.info(f"Table names retrieved from {db_name}.information_schema.tables: {tables}")
-            
-            # Sort tables by hierarchy matching (if enabled)
-            if self.enable_table_hierarchy and tables:
-                tables = self._sort_tables_by_hierarchy(tables)
+                result = execute_query(query, db_name)
+
+            logger.info(f"{db_name}.information_schema.tables query result: {result}")
+
+
+
+            if not result:
+                tables_info = []
+            else:
+                # 构造包含表名和表注释的字典列表
+                tables_info = [{
+                    'table_name': table['TABLE_NAME'],
+                    'table_comment': table['TABLE_COMMENT'] if table['TABLE_COMMENT'] else ''  # 处理可能的None值
+                } for table in result]
+                logger.info(f"Table names retrieved from {db_name}.information_schema.tables: {tables_info}")
+
+            # 如果需要按层次结构排序
+            if self.enable_table_hierarchy and tables_info:
+                # 注意：这里需要调整排序逻辑，因为现在处理的是字典而非单纯的表名
+                tables_info = self._sort_tables_by_hierarchy([table['table_name'] for table in tables_info])
+                # 或者修改 _sort_tables_by_hierarchy 方法以处理字典列表
             
             # Update cache
-            self.metadata_cache[cache_key] = tables
+            self.metadata_cache[cache_key] = tables_info
             self.metadata_cache_time[cache_key] = datetime.now()
             
-            return tables
+            return tables_info
         except Exception as e:
             logger.error(f"Error getting table list: {str(e)}")
             return []
@@ -272,8 +300,9 @@ class MetadataExtractor:
         try:
             result = {}
             tables = self.get_database_tables(self.db_name)
-            
-            for table_name in tables:
+
+            for table_info in tables:
+                table_name = table_info['table_name']
                 schema = self.get_table_schema(table_name, self.db_name)
                 if schema:
                     columns = schema.get("columns", [])
@@ -374,13 +403,13 @@ class MetadataExtractor:
         if db_name:
             # Search only in the specified database
             tables = self.get_database_tables(db_name)
-            matches = [(db_name, table) for table in tables if regex.match(table)]
+            matches = [(db_name, table['table_name']) for table in tables if regex.match(table['table_name'])]
         else:
             # Search in all target databases
             all_tables = self.get_all_tables_from_all_databases()
             
             for db, tables in all_tables.items():
-                db_matches = [(db, table) for table in tables if regex.match(table)]
+                db_matches = [(db, table['table_name']) for table in tables if regex.match(table['table_name'])]
                 matches.extend(db_matches)
         
         return matches
@@ -425,13 +454,37 @@ class MetadataExtractor:
             ORDER BY 
                 ORDINAL_POSITION
             """
-            
-            result = execute_query(query)
-            
+
+            if "mysql_catalog_bigdata." in db_name:
+                db_name2 = db_name.removeprefix("mysql_catalog_bigdata.")
+                query2 = f"""
+                SELECT
+                    COLUMN_NAME,
+                    DATA_TYPE,
+                    IS_NULLABLE,
+                    COLUMN_DEFAULT,
+                    COLUMN_COMMENT,
+                    ORDINAL_POSITION,
+                    COLUMN_KEY,
+                    EXTRA
+                FROM
+                    information_schema.columns
+                WHERE
+                    TABLE_SCHEMA = '{db_name2}'
+                    AND TABLE_NAME = '{table_name}'
+                ORDER BY
+                   ORDINAL_POSITION
+                """
+                result = execute_query_mysql(query2)
+            else:
+                result = execute_query(query)
+
+
+
             if not result:
                 logger.warning(f"Table {db_name}.{table_name} does not exist or has no columns")
                 return {}
-                
+
             # Create structured table schema information
             columns = []
             for col in result:
@@ -447,7 +500,7 @@ class MetadataExtractor:
                     "extra": col.get("EXTRA", "") or ""
                 }
                 columns.append(column_info)
-                
+
             # Get table comment
             table_comment = self.get_table_comment(table_name, db_name)
             
@@ -472,7 +525,21 @@ class MetadataExtractor:
                     TABLE_SCHEMA = '{db_name}' 
                     AND TABLE_NAME = '{table_name}'
                 """
-                table_type_result = execute_query(table_type_query)
+                if "mysql_catalog_bigdata." in db_name:
+                    db_name2 = db_name.removeprefix("mysql_catalog_bigdata.")
+                    table_type_query2 = f"""
+                    SELECT
+                        TABLE_TYPE,
+                        ENGINE
+                    FROM
+                        information_schema.tables
+                    WHERE
+                        TABLE_SCHEMA = '{db_name2}'
+                        AND TABLE_NAME = '{table_name}'
+                    """
+                    table_type_result = execute_query_df_mysql(table_type_query2)
+                else:
+                    table_type_result = execute_query(table_type_query)
                 if table_type_result:
                     schema["table_type"] = table_type_result[0].get("TABLE_TYPE", "")
                     schema["engine"] = table_type_result[0].get("ENGINE", "")
@@ -519,9 +586,21 @@ class MetadataExtractor:
                 TABLE_SCHEMA = '{db_name}' 
                 AND TABLE_NAME = '{table_name}'
             """
-            
-            result = execute_query(query)
-            
+            if "mysql_catalog_bigdata." in db_name:
+                db_name2 = db_name.removeprefix("mysql_catalog_bigdata.")
+                query2 = f"""
+                SELECT
+                    TABLE_COMMENT
+                FROM
+                    information_schema.tables
+                WHERE
+                    TABLE_SCHEMA = '{db_name2}'
+                    AND TABLE_NAME = '{table_name}'
+                """
+                result = execute_query_mysql(query2)
+            else:
+                result = execute_query(query)
+
             if not result or not result[0]:
                 comment = ""
             else:
@@ -570,9 +649,24 @@ class MetadataExtractor:
             ORDER BY 
                 ORDINAL_POSITION
             """
-            
-            result = execute_query(query)
-            
+            if "mysql_catalog_bigdata." in db_name:
+                db_name2 = db_name.removeprefix("mysql_catalog_bigdata.")
+                query2 = f"""
+                SELECT
+                    COLUMN_NAME,
+                    COLUMN_COMMENT
+                FROM
+                    information_schema.columns
+                WHERE
+                    TABLE_SCHEMA = '{db_name2}'
+                    AND TABLE_NAME = '{table_name}'
+                ORDER BY
+                    ORDINAL_POSITION
+                """
+                result = execute_query_mysql(query2)
+            else:
+                result = execute_query(query)
+
             comments = {}
             for col in result:
                 column_name = col.get("COLUMN_NAME", "")
@@ -611,7 +705,12 @@ class MetadataExtractor:
         
         try:
             query = f"SHOW INDEX FROM `{db_name}`.`{table_name}`"
-            df = execute_query_df(query)
+            if "mysql_catalog_bigdata." in db_name:
+                db_name2 = db_name.removeprefix("mysql_catalog_bigdata.")
+                query2 = f"SHOW INDEX FROM `{db_name2}`.`{table_name}`"
+                df = execute_query_df_mysql(query2)
+            else:
+                df = execute_query_df(query)
             
             # Process results
             indexes = []
@@ -664,7 +763,8 @@ class MetadataExtractor:
             
             # Simple foreign key naming convention detection
             # Example: If a table has a column named xxx_id and another table named xxx exists, it might be a foreign key relationship
-            for table_name in tables:
+            for table_info in tables:
+                table_name = table_info['table_name']
                 schema = self.get_table_schema(table_name, self.db_name)
                 columns = schema.get("columns", [])
                 
@@ -675,7 +775,8 @@ class MetadataExtractor:
                         ref_table_name = column_name[:-3]  # Remove _id suffix
                         
                         # Check if the possible table exists
-                        if ref_table_name in tables:
+                        for ref_table_info in tables:
+                            ref_table_name = ref_table_info['table_name']
                             # Find possible primary key column
                             ref_schema = self.get_table_schema(ref_table_name, self.db_name)
                             ref_columns = ref_schema.get("columns", [])
